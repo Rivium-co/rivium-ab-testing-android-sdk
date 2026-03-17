@@ -1,9 +1,7 @@
-val sdkVersion = "0.1.0"
-
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
-    id("maven-publish")
+    id("com.vanniktech.maven.publish")
 }
 
 android {
@@ -34,12 +32,6 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
-
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
 }
 
 dependencies {
@@ -55,29 +47,42 @@ dependencies {
     implementation("com.google.code.gson:gson:2.10.1")
 }
 
-publishing {
-    publications {
-        register<MavenPublication>("release") {
-            groupId = "co.rivium"
-            artifactId = "rivium-ab-testing-android"
-            version = sdkVersion
+mavenPublishing {
+    publishToMavenCentral(
+        com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL,
+        automaticRelease = true
+    )
+    signAllPublications()
 
-            afterEvaluate {
-                from(components["release"])
+    coordinates("co.rivium", "rivium-ab-testing-android", "0.1.0")
+
+    pom {
+        name.set("Rivium A/B Testing Android SDK")
+        description.set("A/B Testing and Feature Flags SDK for Android with offline-first sync")
+        inceptionYear.set("2025")
+        url.set("https://rivium.co")
+
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
+                distribution.set("repo")
             }
+        }
 
-            pom {
-                name.set("Rivium A/B Testing Android SDK")
-                description.set("A/B Testing SDK for Android")
+        developers {
+            developer {
+                id.set("rivium")
+                name.set("Rivium")
+                email.set("founder@rivium.co")
                 url.set("https://rivium.co")
-
-                licenses {
-                    license {
-                        name.set("MIT")
-                        url.set("https://opensource.org/licenses/MIT")
-                    }
-                }
             }
+        }
+
+        scm {
+            url.set("https://github.com/Rivium-co/rivium-ab-testing-android-sdk")
+            connection.set("scm:git:git://github.com/Rivium-co/rivium-ab-testing-android-sdk.git")
+            developerConnection.set("scm:git:ssh://git@github.com/Rivium-co/rivium-ab-testing-android-sdk.git")
         }
     }
 }
