@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/background">
+
+    <!-- Toolbar -->
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="@color/primary"
+        app:title="RiviumAbTesting SDK Example"
+        app:titleTextColor="@android:color/white" />
+
+    <!-- Status Card -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="2dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="SDK Status"
+                android:textSize="14sp"
+                android:textColor="@color/text_secondary" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <View
+                    android:id="@+id/statusIndicator"
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:layout_gravity="center_vertical"
+                    android:background="@drawable/status_indicator" />
+
+                <TextView
+                    android:id="@+id/statusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="Not Initialized"
+                    android:textSize="16sp"
+                    android:textColor="@color/text_primary"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/statusDetails"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Press 'Initialize SDK' to start"
+                android:textSize="12sp"
+                android:textColor="@color/text_secondary" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- Configuration Card -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="2dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Configuration"
+                android:textSize="14sp"
+                android:textColor="@color/text_secondary" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="API Key"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/apiKeyInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text"
+                    android:text="YOUR_API_KEY_HERE" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <!-- Base URL is configured via BuildConfig, not exposed to users -->
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/baseUrlLayout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="Base URL"
+                android:visibility="gone"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/baseUrlInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textUri" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="User ID (optional)"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/userIdInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text"
+                    android:text="test_user_001" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="Experiment Key"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/experimentKeyInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text"
+                    android:text="my-experiment" />
+            </com.google.android.material.textfield.TextInputLayout>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- ScrollView for test buttons -->
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingHorizontal="16dp"
+            android:paddingBottom="16dp">
+
+            <!-- Test Actions -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Test Actions"
+                android:textSize="14sp"
+                android:textColor="@color/text_secondary"
+                android:layout_marginBottom="8dp" />
+
+            <!-- 1. Initialize SDK -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnInitialize"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="1. Initialize SDK"
+                app:icon="@android:drawable/ic_menu_compass" />
+
+            <!-- 2. Get Variant -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnGetVariant"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="2. Get Variant"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.TonalButton" />
+
+            <!-- 3. Track View -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnTrackView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="3. Track View"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.TonalButton" />
+
+            <!-- 4. Track Click -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnTrackClick"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="4. Track Click"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.TonalButton" />
+
+            <!-- 5. Track Conversion -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnTrackConversion"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="5. Track Conversion"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.TonalButton" />
+
+            <!-- 6. Track Custom Event -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnTrackCustom"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="6. Track Custom Event"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.TonalButton" />
+
+            <!-- 7. Flush Events -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnFlush"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="7. Flush Events"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.TonalButton" />
+
+            <!-- 8. Reset SDK -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnReset"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="8. Reset SDK"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.OutlinedButton" />
+
+            <!-- Open Test Simulator -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnOpenTestActivity"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="Open A/B Test Simulator"
+                android:enabled="false"
+                app:backgroundTint="#10B981" />
+
+            <!-- Open Simple Example -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnOpenSimpleActivity"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Open Simple Example"
+                android:enabled="false"
+                style="@style/Widget.Material3.Button.OutlinedButton" />
+
+            <!-- Open Feature Flags Example -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnOpenFeatureFlags"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Open Feature Flags Example"
+                android:enabled="false"
+                app:backgroundTint="#8B5CF6" />
+
+            <!-- Log Output -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Log Output"
+                android:textSize="14sp"
+                android:textColor="@color/text_secondary"
+                android:layout_marginTop="16dp"
+                android:layout_marginBottom="8dp" />
+
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardCornerRadius="8dp"
+                app:cardElevation="0dp"
+                app:cardBackgroundColor="#1F2937">
+
+                <ScrollView
+                    android:id="@+id/logScrollView"
+                    android:layout_width="match_parent"
+                    android:layout_height="200dp">
+
+                    <TextView
+                        android:id="@+id/logOutput"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:padding="12dp"
+                        android:fontFamily="monospace"
+                        android:textSize="11sp"
+                        android:textColor="#10B981"
+                        android:text="// SDK logs will appear here..." />
+                </ScrollView>
+            </com.google.android.material.card.MaterialCardView>
+
+        </LinearLayout>
+    </ScrollView>
+
+</LinearLayout>
