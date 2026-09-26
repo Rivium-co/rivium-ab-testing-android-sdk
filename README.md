@@ -20,7 +20,7 @@ Add the SDK to your app's `build.gradle`:
 
 ```gradle
 dependencies {
-    implementation 'co.rivium:rivium-ab-testing-android:0.1.0'
+    implementation 'co.rivium:rivium-ab-testing-android:0.2.0'
 }
 ```
 
