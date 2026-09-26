@@ -33,7 +33,9 @@ import co.rivium.abtesting.RiviumAbTestingConfig
 // 1. Initialize the SDK
 val config = RiviumAbTestingConfig(
     apiKey = "rv_live_your_api_key",
-    debug = true
+    // Your server mints this for the signed-in user (see "User tokens").
+    // Runs on a background thread, so a blocking call is fine.
+    tokenProvider = RiviumTokenProvider { myBackend.fetchRiviumTokenBlocking() }
 )
 RiviumAbTesting.init(context, config)
 
@@ -55,6 +57,27 @@ RiviumAbTesting.trackConversion("checkout-redesign", 49.99)
 // 5. Flush pending events
 RiviumAbTesting.flush()
 ```
+
+## User tokens
+
+The API key ships inside your app, so anyone can read it. On its own it can't
+prove which user a request is for. Your server can: it holds your project's
+**server secret** and mints a short-lived token for the signed-in user
+(`POST https://auth.rivium.co/users/token`, or `createUserToken()` in the
+Node.js SDK). The SDK sends it with every request, and the service takes the
+user from the token instead of from the app.
+
+`RiviumTokenProvider.fetchToken()` is called on a background thread when a
+token is needed, again shortly before it expires, and once more if the service
+reports it expired. Calling `setUserId` with a different user sends the last
+user's pending events under their own token, then drops their variants and
+token.
+
+A token is **required**: assigning variants, tracking events and
+evaluating flags are refused without one (reading the experiment and flag
+lists is not, so the app can load them before anyone signs in). The same token works for Rivium Chat and Sync.
+
+**Never put the server secret in the app.**
 
 ## A/B Testing
 
@@ -239,7 +262,8 @@ RiviumAbTesting.flush()
 ```kotlin
 val config = RiviumAbTestingConfig(
     apiKey = "rv_live_your_api_key",
-    debug = true,                // Enable debug logging
+    tokenProvider = tokenProvider, // user token minted by your server
+    debug = false,               // log to logcat (development only; no keys or bodies are logged)
     flushInterval = 10000L,      // Auto-flush interval in ms (default: 30s)
     maxQueueSize = 50            // Max events before auto-flush (default: 100)
 )

@@ -39,27 +39,19 @@ internal object Logger {
         }
     }
 
+    // Request and response bodies are not logged: they carry user ids and
+    // user attributes, and debug builds are shared (logcat, bug reports).
+    @Suppress("UNUSED_PARAMETER")
     fun logRequest(method: String, url: String, body: String? = null) {
         if (isEnabled) {
-            Log.d(TAG, "┌────── Request ──────")
-            Log.d(TAG, "│ $method $url")
-            body?.let {
-                Log.d(TAG, "│ Body: $it")
-            }
-            Log.d(TAG, "└─────────────────────")
+            Log.d(TAG, "→ $method ${url.substringBefore('?')}")
         }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun logResponse(url: String, code: Int, body: String?) {
         if (isEnabled) {
-            Log.d(TAG, "┌────── Response ─────")
-            Log.d(TAG, "│ $url")
-            Log.d(TAG, "│ Status: $code")
-            body?.let {
-                val truncated = if (it.length > 500) it.take(500) + "..." else it
-                Log.d(TAG, "│ Body: $truncated")
-            }
-            Log.d(TAG, "└─────────────────────")
+            Log.d(TAG, "← $code ${url.substringBefore('?')}")
         }
     }
 }

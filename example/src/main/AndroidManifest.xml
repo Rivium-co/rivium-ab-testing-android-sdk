@@ -11,8 +11,7 @@
         android:label="@string/app_name"
         android:roundIcon="@drawable/ic_launcher_foreground"
         android:supportsRtl="true"
-        android:theme="@style/Theme.RiviumAbTestingExample"
-        android:usesCleartextTraffic="true">
+        android:theme="@style/Theme.RiviumAbTestingExample">
         
         <activity
             android:name=".MainActivity"

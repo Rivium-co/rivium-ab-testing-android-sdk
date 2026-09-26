@@ -55,7 +55,7 @@ object RiviumAbTesting {
         // Enable logging based on config (must be first)
         Logger.isEnabled = config.debug
         Logger.i("RiviumAbTesting SDK initializing...")
-        Logger.d("Config: apiKey=${config.apiKey.take(20)}..., debug=${config.debug}")
+        Logger.d("Config: apiKey=${Redact.key(config.apiKey)}, debug=${config.debug}")
 
         if (isInitialized) {
             Logger.d("SDK already initialized, skipping")
@@ -66,7 +66,12 @@ object RiviumAbTesting {
         this.config = config
         this.storage = Storage(context.applicationContext)
         this.apiClient = ApiClient(config)
-        this.eventQueue = EventQueue(context.applicationContext, apiClient!!, config.flushInterval, config.maxQueueSize)
+        this.eventQueue = EventQueue(
+            context.applicationContext,
+            apiClient!!,
+            config.flushInterval,
+            config.maxQueueSize
+        ) { storage?.userId }
         this.targetingEngine = TargetingEngine()
 
         callback?.let { addCallback(it) }
@@ -159,6 +164,16 @@ object RiviumAbTesting {
     @JvmStatic
     fun setUserId(userId: String) {
         ensureInitialized()
+        val previous = storage?.userId
+        if (previous != null && previous != userId) {
+            // Send the last user's pending events under their own token, then
+            // drop that token: the next request fetches one for the new user.
+            val oldToken = apiClient?.peekToken()
+            apiClient?.clearToken()
+            val queue = eventQueue
+            val theirs = queue?.detach(previous).orEmpty()
+            scope.launch { queue?.sendDetached(theirs, oldToken) }
+        }
         storage?.userId = userId
         storage?.clearAssignments() // Clear cached assignments when user changes
     }
@@ -673,6 +688,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun reset() {
+        apiClient?.clearToken()
         dispose()
         storage?.clear()
         experiments = emptyList()

@@ -32,6 +32,11 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
+
+    testOptions {
+        // android.util.Log in unit tests: do nothing instead of throwing.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -45,6 +50,12 @@ dependencies {
     // HTTP & JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    // The real org.json, instead of the empty stub unit tests get.
+    testImplementation("org.json:json:20231013")
 }
 
 mavenPublishing {
@@ -54,7 +65,7 @@ mavenPublishing {
     )
     signAllPublications()
 
-    coordinates("co.rivium", "rivium-ab-testing-android", "0.1.0")
+    coordinates("co.rivium", "rivium-ab-testing-android", "0.2.0")
 
     pom {
         name.set("Rivium A/B Testing Android SDK")

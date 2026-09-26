@@ -14,7 +14,9 @@ internal class EventQueue(
     private val context: Context,
     private val apiClient: ApiClient,
     private val flushInterval: Long,
-    private val maxQueueSize: Int
+    private val maxQueueSize: Int,
+    /** The signed-in user; with a user token only their events may be sent. */
+    private val currentUserId: () -> String? = { null }
 ) {
     private val deviceId: String by lazy {
         Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown"
@@ -32,7 +34,7 @@ internal class EventQueue(
     companion object {
         private const val PREFS_NAME = "rivium_ab_testing_events"
         private const val KEY_EVENTS = "pending_events"
-        private const val SDK_VERSION = "android-1.1.0"
+        private const val SDK_VERSION = "android-${ApiClient.SDK_VERSION}"
     }
 
     fun start() {
@@ -71,36 +73,85 @@ internal class EventQueue(
     suspend fun flush() {
         if (events.isEmpty()) return
 
+        // With a user token the service credits every event in the batch to
+        // the token's user, so another user's leftover events can't be sent
+        // under it: they would be credited to the wrong person.
+        if (apiClient.usesUserToken) {
+            val userId = currentUserId()
+            val foreign = events.filter { it.userId != userId }
+            if (foreign.isNotEmpty()) {
+                events.removeAll(foreign.toSet())
+                persistEvents()
+                Logger.w("Dropped ${foreign.size} events of a previous user")
+            }
+            if (events.isEmpty()) return
+        }
+
         val toFlush = events.toList()
-        events.clear()
-        // Clear persisted events since we're attempting to flush
-        clearPersistedEvents()
+        events.removeAll(toFlush.toSet())
+        persistEvents()
 
         val result = apiClient.syncOfflineEvents(
             events = toFlush,
             deviceId = deviceId,
             sdkVersion = SDK_VERSION
         )
+        handleResult(result, toFlush, requeue = true)
+    }
 
-        if (result.isFailure) {
-            val error = result.exceptionOrNull()
-            val errorMessage = error?.message ?: "Unknown error"
+    /**
+     * Takes one user's pending events out of the queue, before another user
+     * signs in, so they are sent under that user's own token. Whatever cannot
+     * be sent then is dropped: after the switch there is no token left to
+     * send it under.
+     */
+    fun detach(userId: String): List<TrackEvent> {
+        val theirs = events.filter { it.userId == userId }
+        if (theirs.isNotEmpty()) {
+            events.removeAll(theirs.toSet())
+            persistEvents()
+        }
+        return theirs
+    }
 
-            // Check if it's a limit exceeded error (403) - don't retry these
-            val isLimitExceeded = error is RiviumAbTestingError.ApiError && error.code == 403
-
-            if (isLimitExceeded) {
-                // Don't re-queue events for limit errors - they will keep failing
-                Logger.e("Event limit exceeded - events discarded: $errorMessage")
-            } else {
-                // Re-add events for other failures (network issues, etc.)
-                events.addAll(0, toFlush)
-                persistEvents()
-                Logger.e("Failed to sync events (will retry): $errorMessage")
-            }
+    /** Sends events taken with [detach] under [token]. */
+    suspend fun sendDetached(theirs: List<TrackEvent>, token: String?) {
+        if (theirs.isEmpty()) return
+        if (apiClient.usesUserToken && token == null) {
+            Logger.w("No token for the previous user - ${theirs.size} events dropped")
+            return
+        }
+        val result = if (apiClient.usesUserToken) {
+            apiClient.syncOfflineEvents(theirs, deviceId, SDK_VERSION, token, useExplicitToken = true)
         } else {
+            apiClient.syncOfflineEvents(theirs, deviceId, SDK_VERSION)
+        }
+        handleResult(result, theirs, requeue = !apiClient.usesUserToken)
+    }
+
+    private fun handleResult(
+        result: Result<ApiClient.SyncResult>,
+        sent: List<TrackEvent>,
+        requeue: Boolean
+    ) {
+        if (result.isSuccess) {
             val syncResult = result.getOrNull()
             Logger.i("Synced ${syncResult?.synced ?: 0} events, failed: ${syncResult?.failed ?: 0}")
+            return
+        }
+
+        val error = result.exceptionOrNull()
+        val code = (error as? RiviumAbTestingError.ApiError)?.code
+        // Retry only what can succeed later: no network, rate limited, a
+        // server error, or no valid token yet (401). Any other 4xx (a bad
+        // request, the monthly event limit) would fail again forever.
+        val retryable = code == null || code == 401 || code == 429 || code >= 500
+        if (retryable && requeue) {
+            events.addAll(0, sent)
+            persistEvents()
+            Logger.e("Failed to sync events (will retry): ${error?.message}")
+        } else {
+            Logger.e("Events discarded: ${error?.message}")
         }
     }
 

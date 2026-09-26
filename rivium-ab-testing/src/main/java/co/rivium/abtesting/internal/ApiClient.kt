@@ -14,9 +14,14 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-internal class ApiClient(private val config: RiviumAbTestingConfig) {
+internal class ApiClient(
+    private val config: RiviumAbTestingConfig,
+    private val baseUrl: String = "https://abtest.rivium.co"
+) {
 
     init {
         // Enable logging based on config
@@ -31,13 +36,95 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
     private val gson = Gson()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-    private val baseUrl: String = "https://abtest.rivium.co"
+    // ============================================
+    // Requests and the user token
+    // ============================================
 
-    private val headers: Map<String, String>
-        get() = mapOf(
-            "Content-Type" to "application/json",
-            "x-api-key" to config.apiKey
-        )
+    private val tokenLock = Any()
+    private var cachedToken: String? = null
+    private var cachedTokenExpiresAt = 0L // seconds since epoch
+
+    /** True when requests carry a user token (the service then credits them to its user). */
+    val usesUserToken: Boolean
+        get() = config.tokenProvider != null || config.userToken != null
+
+    /** Forget the cached token, e.g. when another user signs in. */
+    fun clearToken() {
+        synchronized(tokenLock) {
+            cachedToken = null
+            cachedTokenExpiresAt = 0L
+        }
+    }
+
+    /** The token held right now, without fetching a new one. */
+    fun peekToken(): String? = config.userToken ?: synchronized(tokenLock) { cachedToken }
+
+    /** The current token, fetched through the provider when needed. Blocking; call off the main thread. */
+    private fun currentToken(): String? {
+        config.userToken?.let { return it }
+        val provider = config.tokenProvider ?: return null
+        synchronized(tokenLock) {
+            val now = System.currentTimeMillis() / 1000
+            cachedToken?.let { if (cachedTokenExpiresAt - TOKEN_REFRESH_SKEW_S > now) return it }
+            return try {
+                val token = provider.fetchToken()
+                cachedToken = token
+                cachedTokenExpiresAt = tokenExpiry(token)
+                token
+            } catch (e: Exception) {
+                Logger.e("tokenProvider failed: ${e.message}")
+                cachedToken
+            }
+        }
+    }
+
+    /**
+     * Every call to the service goes through here: the API key, the user token
+     * and one retry with a fresh token when the service says it expired.
+     *
+     * [explicitToken] sends a specific token instead (a user who just signed
+     * out still has events to send under their own token); `null` with
+     * [useExplicitToken] sends none.
+     */
+    private fun send(
+        url: String,
+        jsonBody: String? = null,
+        explicitToken: String? = null,
+        useExplicitToken: Boolean = false,
+        retry: Boolean = true
+    ): Response {
+        val token = if (useExplicitToken) explicitToken else currentToken()
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("Content-Type", "application/json")
+            .addHeader("x-api-key", config.apiKey)
+            .apply { if (token != null) addHeader("x-user-token", token) }
+            .apply { if (jsonBody != null) post(jsonBody.toRequestBody(jsonMediaType)) else get() }
+            .build()
+
+        val response = client.newCall(request).execute()
+        if (response.code == 401 && retry && !useExplicitToken && config.tokenProvider != null) {
+            val code = try {
+                JSONObject(response.peekBody(4096).string()).optString("code")
+            } catch (e: Exception) {
+                ""
+            }
+            if (code == "token_expired") {
+                response.close()
+                clearToken()
+                return send(url, jsonBody, retry = false)
+            }
+            if (code.isNotEmpty()) Logger.w("User token rejected: $code")
+        }
+        return response
+    }
+
+    /** `exp` from the token payload; 0 (fetch again next time) if unreadable. */
+    private fun tokenExpiry(token: String): Long = try {
+        JSONObject(Base64Url.decodeToString(token.split('.')[1])).optLong("exp", 0L)
+    } catch (e: Exception) {
+        0L
+    }
 
     /**
      * Fetch all running experiments for the project
@@ -47,13 +134,7 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
             val url = "$baseUrl/public/experiments"
             Logger.logRequest("GET", url)
 
-            val request = Request.Builder()
-                .url(url)
-                .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                .get()
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = send(url)
             val body = response.body?.string() ?: "[]"
             Logger.logResponse(url, response.code, body)
 
@@ -84,13 +165,7 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
             val url = "$baseUrl/public/flags"
             Logger.logRequest("GET", url)
 
-            val request = Request.Builder()
-                .url(url)
-                .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                .get()
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = send(url)
             val body = response.body?.string() ?: "{}"
             Logger.logResponse(url, response.code, body)
 
@@ -131,13 +206,7 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
             val jsonBody = gson.toJson(payload)
             Logger.logRequest("POST", url, jsonBody)
 
-            val request = Request.Builder()
-                .url(url)
-                .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                .post(jsonBody.toRequestBody(jsonMediaType))
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = send(url, jsonBody)
             val body = response.body?.string() ?: "{}"
             Logger.logResponse(url, response.code, body)
 
@@ -175,13 +244,7 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
             val jsonBody = gson.toJson(payload)
             Logger.logRequest("POST", url, jsonBody)
 
-            val request = Request.Builder()
-                .url(url)
-                .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                .post(jsonBody.toRequestBody(jsonMediaType))
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = send(url, jsonBody)
             val body = response.body?.string() ?: "{}"
             Logger.logResponse(url, response.code, body)
 
@@ -219,13 +282,7 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
             Logger.logRequest("POST", url, jsonBody)
             Logger.i("Tracking ${events.size} events")
 
-            val request = Request.Builder()
-                .url(url)
-                .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                .post(jsonBody.toRequestBody(jsonMediaType))
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = send(url, jsonBody)
             val body = response.body?.string()
             Logger.logResponse(url, response.code, body)
 
@@ -250,7 +307,9 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
     suspend fun syncOfflineEvents(
         events: List<TrackEvent>,
         deviceId: String,
-        sdkVersion: String = "android-1.1.0"
+        sdkVersion: String = "android-${SDK_VERSION}",
+        explicitToken: String? = null,
+        useExplicitToken: Boolean = false
     ): Result<SyncResult> = withContext(Dispatchers.IO) {
         try {
             val payload = mapOf(
@@ -271,13 +330,7 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
                 "sdkVersion" to sdkVersion
             )
 
-            val request = Request.Builder()
-                .url("$baseUrl/public/sync")
-                .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                .post(gson.toJson(payload).toRequestBody(jsonMediaType))
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = if (useExplicitToken) send("$baseUrl/public/sync", gson.toJson(payload), explicitToken, true) else send("$baseUrl/public/sync", gson.toJson(payload))
             val body = response.body?.string() ?: "{}"
 
             if (!response.isSuccessful) {
@@ -310,16 +363,10 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
      */
     suspend fun initSdk(
         platform: String = "android",
-        sdkVersion: String = "1.1.0"
+        sdkVersion: String = SDK_VERSION
     ): Result<InitResponse> = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder()
-                .url("$baseUrl/public/init?platform=$platform&sdkVersion=$sdkVersion")
-                .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                .get()
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = send("$baseUrl/public/init?platform=$platform&sdkVersion=$sdkVersion")
             if (!response.isSuccessful) {
                 return@withContext Result.failure(
                     RiviumAbTestingError.ApiError(response.code, response.message)
@@ -333,6 +380,11 @@ internal class ApiClient(private val config: RiviumAbTestingConfig) {
         } catch (e: Exception) {
             Result.failure(RiviumAbTestingError.NetworkError(e.message ?: "Network error"))
         }
+    }
+
+    companion object {
+        const val SDK_VERSION = "0.2.0"
+        private const val TOKEN_REFRESH_SKEW_S = 60L
     }
 
     private data class ApiResponse<T>(
