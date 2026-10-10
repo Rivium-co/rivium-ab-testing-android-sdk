@@ -1,10 +1,9 @@
 package co.rivium.abtesting
 
 import android.content.Context
+import android.provider.Settings
 import co.rivium.abtesting.internal.*
 import co.rivium.abtesting.models.*
-import kotlinx.coroutines.*
-import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -21,25 +20,22 @@ import java.util.concurrent.CopyOnWriteArrayList
  * // Track conversion
  * RiviumAbTesting.trackConversion("experiment-key", 99.99)
  * ```
+ *
+ * No method here throws when the SDK is not initialized or no user is signed
+ * in: getters return the default you pass and `track…` does nothing.
  */
 object RiviumAbTesting {
-    private var config: RiviumAbTestingConfig? = null
-    private var storage: Storage? = null
-    private var apiClient: ApiClient? = null
-    private var eventQueue: EventQueue? = null
-    private var targetingEngine: TargetingEngine? = null
+    @Volatile private var core: Core? = null
     private var networkObserver: NetworkObserver? = null
 
     private val callbacks = CopyOnWriteArrayList<RiviumAbTestingCallback>()
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-
-    private var experiments: List<Experiment> = emptyList()
-    private var featureFlags: List<FeatureFlag> = emptyList()
-    private var isInitialized = false
-    private var _isOnline = true
 
     /**
      * Initialize RiviumAbTesting SDK
+     *
+     * If the first attempt could not reach the service (no network), the SDK
+     * works from what it has cached and tries again when the network returns;
+     * calling `init` again also tries again.
      *
      * @param context Application context
      * @param config SDK configuration
@@ -47,6 +43,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     @JvmOverloads
+    @Synchronized
     fun init(
         context: Context,
         config: RiviumAbTestingConfig,
@@ -57,125 +54,72 @@ object RiviumAbTesting {
         Logger.i("RiviumAbTesting SDK initializing...")
         Logger.d("Config: apiKey=${Redact.key(config.apiKey)}, debug=${config.debug}")
 
-        if (isInitialized) {
-            Logger.d("SDK already initialized, skipping")
-            callback?.onInitialized()
+        core?.let { running ->
+            if (running.isInitialized) {
+                Logger.d("SDK already initialized, skipping")
+                callback?.onInitialized()
+            } else {
+                // The first attempt failed: try again with what is already
+                // running instead of starting a second queue and observer.
+                callback?.let { addCallback(it) }
+                running.retryLoad()
+            }
             return
         }
 
-        this.config = config
-        this.storage = Storage(context.applicationContext)
-        this.apiClient = ApiClient(config)
-        this.eventQueue = EventQueue(
-            context.applicationContext,
-            apiClient!!,
-            config.flushInterval,
-            config.maxQueueSize
-        ) { storage?.userId }
-        this.targetingEngine = TargetingEngine()
-
+        val appContext = context.applicationContext
         callback?.let { addCallback(it) }
 
-        // Generate or restore user ID
-        if (storage?.userId == null) {
-            storage?.userId = UUID.randomUUID().toString()
-            Logger.d("Generated new user ID: ${storage?.userId}")
-        } else {
-            Logger.d("Restored user ID: ${storage?.userId}")
+        val created = Core(
+            config = config,
+            storage = Storage(appContext),
+            api = ApiClient(config),
+            eventStore = SharedPreferencesStore(appContext, EventQueue.PREFS_NAME),
+            deviceId = {
+                try {
+                    Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
+                } catch (e: Exception) {
+                    null
+                } ?: "unknown"
+            },
+            callbacks = callbacks,
+            onAwaitingUserToken = { onAwaitingUserToken?.invoke() }
+        )
+        core = created
+
+        // Network observer: sync on reconnect, and try a failed init again
+        networkObserver = NetworkObserver(
+            appContext,
+            onNetworkAvailable = { created.networkAvailable() },
+            onNetworkLost = { created.networkLost() }
+        ).also {
+            it.start()
+            if (!it.isNetworkAvailable()) created.networkLost()
         }
 
-        // Start network observer for auto-sync on reconnect
-        networkObserver = NetworkObserver(context.applicationContext) {
-            if (!_isOnline) {
-                _isOnline = true
-                Logger.i("Network available - syncing pending events")
-                scope.launch {
-                    eventQueue?.flush()
-                    // Refresh experiments and flags when coming online
-                    refreshExperimentsInternal()
-                    refreshFeatureFlagsInternal()
-                }
-            }
-        }
-        networkObserver?.start()
-        _isOnline = networkObserver?.isNetworkAvailable() ?: true
-
-        // Start event queue
-        eventQueue?.start()
-        Logger.d("Event queue started")
-
-        // Load cached experiments and feature flags
-        experiments = storage?.getExperiments() ?: emptyList()
-        featureFlags = storage?.getFeatureFlags() ?: emptyList()
-        Logger.d("Loaded ${experiments.size} cached experiments and ${featureFlags.size} cached feature flags")
-
-        // Fetch fresh experiments, feature flags, and SDK config
-        scope.launch {
-            Logger.i("Fetching experiments and feature flags from server...")
-
-            // Fetch SDK config from /public/init
-            apiClient?.initSdk()?.onSuccess { initResponse ->
-                initResponse.config?.let { sdkConfig ->
-                    Logger.d("SDK config: syncInterval=${sdkConfig.syncIntervalSeconds}s, maxBatch=${sdkConfig.maxBatchSize}")
-                }
-            }?.onFailure { error ->
-                Logger.w("Failed to fetch SDK config: ${error.message}")
-            }
-
-            // Fetch experiments
-            val experimentsResult = apiClient?.fetchExperiments()
-            experimentsResult?.onSuccess { fetchedExperiments ->
-                experiments = fetchedExperiments
-                storage?.saveExperiments(fetchedExperiments)
-                Logger.i("Fetched ${fetchedExperiments.size} experiments")
-            }?.onFailure { error ->
-                Logger.w("Failed to fetch experiments: ${error.message}")
-            }
-
-            // Fetch feature flags
-            val flagsResult = apiClient?.fetchFeatureFlags()
-            flagsResult?.onSuccess { fetchedFlags ->
-                featureFlags = fetchedFlags
-                storage?.saveFeatureFlags(fetchedFlags)
-                Logger.i("Fetched ${fetchedFlags.size} feature flags")
-            }?.onFailure { error ->
-                Logger.w("Failed to fetch feature flags: ${error.message}")
-            }
-
-            // Mark as initialized if at least one succeeded
-            if (experimentsResult?.isSuccess == true || flagsResult?.isSuccess == true) {
-                isInitialized = true
-                Logger.i("RiviumAbTesting SDK initialized successfully")
-                callbacks.forEach { it.onInitialized() }
-            } else {
-                Logger.e("SDK initialization failed")
-                this@RiviumAbTesting.config = null
-                val error = experimentsResult?.exceptionOrNull() ?: flagsResult?.exceptionOrNull()
-                callbacks.forEach { cb ->
-                    cb.onError(error as? RiviumAbTestingError ?: RiviumAbTestingError.NetworkError(error?.message ?: "Unknown error"))
-                }
-            }
-        }
+        created.start()
     }
 
     /**
      * Set user ID for experiment assignment
+     *
+     * With a different id this is a user switch: the previous user's
+     * variants, attributes, token and pending events are cleared before
+     * anything is done for the new user.
      */
     @JvmStatic
     fun setUserId(userId: String) {
-        ensureInitialized()
-        val previous = storage?.userId
-        if (previous != null && previous != userId) {
-            // Send the last user's pending events under their own token, then
-            // drop that token: the next request fetches one for the new user.
-            val oldToken = apiClient?.peekToken()
-            apiClient?.clearToken()
-            val queue = eventQueue
-            val theirs = queue?.detach(previous).orEmpty()
-            scope.launch { queue?.sendDetached(theirs, oldToken) }
-        }
-        storage?.userId = userId
-        storage?.clearAssignments() // Clear cached assignments when user changes
+        core?.setUserId(userId) ?: notInitialized("setUserId")
+    }
+
+    /**
+     * Sign-out: forgets the user, their variants, attributes, token and
+     * pending events. The SDK then waits for a user token again (see
+     * [isAwaitingUserToken]).
+     */
+    @JvmStatic
+    fun clearUserId() {
+        core?.clearUserId() ?: notInitialized("clearUserId")
     }
 
     /**
@@ -183,7 +127,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun getUserId(): String? {
-        return storage?.userId
+        return core?.userId
     }
 
     /**
@@ -191,12 +135,61 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun setUserAttributes(attributes: Map<String, Any>) {
-        ensureInitialized()
-        storage?.userAttributes = attributes
+        core?.setUserAttributes(attributes) ?: notInitialized("setUserAttributes")
+    }
+
+    // ==========================================
+    // USER TOKEN
+    // ==========================================
+
+    /**
+     * True while the SDK waits for a user token: assigning variants, tracking
+     * and flag evaluation need one and the app has not supplied one (no one
+     * is signed in yet). Nothing is sent for a user meanwhile: [getVariant]
+     * returns the default you pass and events are kept. The SDK carries on by
+     * itself once [setUserToken] is called, or after [refreshUserToken] when
+     * a token provider is used.
+     */
+    @JvmStatic
+    val isAwaitingUserToken: Boolean
+        get() = core?.isAwaitingUserToken ?: false
+
+    /** Called on the main thread once each time the SDK starts waiting for a user token. */
+    @JvmStatic
+    @Volatile
+    var onAwaitingUserToken: (() -> Unit)? = null
+
+    /**
+     * Hand the SDK a user token minted by your server, for apps that do not
+     * use a token provider. Call it after sign-in and whenever you refresh
+     * the token; pass null after sign-out.
+     *
+     * If the SDK was waiting for a token it carries on now: the variants your
+     * app asked for are fetched and the kept events are sent. A token for
+     * another user is a user switch, as in [setUserId].
+     */
+    @JvmStatic
+    fun setUserToken(token: String?) {
+        core?.setUserToken(token) ?: notInitialized("setUserToken")
+    }
+
+    /**
+     * For apps that use a token provider: call this when the user signs in
+     * or out. The SDK asks the provider again now and carries on as that
+     * user, or waits if the provider has no token.
+     */
+    @JvmStatic
+    fun refreshUserToken() {
+        core?.refreshUserToken() ?: notInitialized("refreshUserToken")
     }
 
     /**
      * Get variant for an experiment
+     *
+     * Never blocks: returns the variant the service assigned earlier, or
+     * [defaultVariant] while the answer is fetched in the background (then
+     * [RiviumAbTestingCallback.onExperimentAssigned] is called). Use
+     * [getVariantAsync] to wait for the answer.
      *
      * @param experimentKey The experiment key
      * @param defaultVariant Default variant to return if experiment not found
@@ -205,48 +198,13 @@ object RiviumAbTesting {
     @JvmStatic
     @JvmOverloads
     fun getVariant(experimentKey: String, defaultVariant: String = "control"): String {
-        ensureInitialized()
-
-        // Check cached assignment
-        storage?.getAssignment(experimentKey)?.let { assignment ->
-            return assignment.variantKey
-        }
-
-        // Find experiment
-        val experiment = experiments.find { it.key == experimentKey }
-            ?: return defaultVariant
-
-        // Check if experiment is running
-        if (experiment.status != ExperimentStatus.RUNNING) {
-            return defaultVariant
-        }
-
-        // Check targeting rules
-        val userAttributes = storage?.userAttributes ?: emptyMap()
-        if (!targetingEngine!!.evaluate(experiment.targetingRules, userAttributes)) {
-            return defaultVariant
-        }
-
-        // Get assignment from server
-        val userId = storage?.userId ?: return defaultVariant
-
-        var result = defaultVariant
-        runBlocking {
-            apiClient?.getAssignment(experimentKey, userId, userAttributes)?.onSuccess { assignment ->
-                storage?.saveAssignment(experimentKey, assignment)
-                result = assignment.variantKey
-
-                callbacks.forEach {
-                    it.onExperimentAssigned(experimentKey, assignment.variantKey, assignment.config)
-                }
-            }
-        }
-
-        return result
+        return core?.getVariant(experimentKey, defaultVariant) ?: defaultVariant.also { notInitialized("getVariant") }
     }
 
     /**
-     * Get variant asynchronously
+     * Get variant asynchronously: waits for the service's answer.
+     * [onResult] is called on the main thread, with [defaultVariant] when
+     * there is no answer (no user token yet, no network, not in the experiment list).
      */
     @JvmStatic
     fun getVariantAsync(
@@ -254,11 +212,9 @@ object RiviumAbTesting {
         defaultVariant: String = "control",
         onResult: (String) -> Unit
     ) {
-        scope.launch {
-            val variant = withContext(Dispatchers.IO) {
-                getVariant(experimentKey, defaultVariant)
-            }
-            onResult(variant)
+        core?.getVariantAsync(experimentKey, defaultVariant, onResult) ?: run {
+            notInitialized("getVariantAsync")
+            onResult(defaultVariant)
         }
     }
 
@@ -267,8 +223,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun getVariantConfig(experimentKey: String): Map<String, Any>? {
-        ensureInitialized()
-        return storage?.getAssignment(experimentKey)?.config
+        return core?.getVariantConfig(experimentKey)
     }
 
     /**
@@ -479,22 +434,13 @@ object RiviumAbTesting {
         trackEvent(experimentKey, eventType, eventName, eventValue, properties)
     }
 
+
     /**
      * Refresh experiments from server
      */
     @JvmStatic
     fun refreshExperiments() {
-        scope.launch {
-            apiClient?.fetchExperiments()?.onSuccess { fetchedExperiments ->
-                experiments = fetchedExperiments
-                storage?.saveExperiments(fetchedExperiments)
-                callbacks.forEach { it.onExperimentsRefreshed(fetchedExperiments) }
-            }?.onFailure { error ->
-                callbacks.forEach {
-                    it.onError(error as? RiviumAbTestingError ?: RiviumAbTestingError.NetworkError(error.message ?: "Unknown error"))
-                }
-            }
-        }
+        core?.refreshExperiments()
     }
 
     /**
@@ -502,7 +448,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun getExperiments(): List<Experiment> {
-        return experiments
+        return core?.experiments ?: emptyList()
     }
 
     // ==========================================
@@ -519,43 +465,7 @@ object RiviumAbTesting {
     @JvmStatic
     @JvmOverloads
     fun isFeatureEnabled(flagKey: String, defaultValue: Boolean = false): Boolean {
-        ensureInitialized()
-
-        // First check locally cached flags
-        val flag = featureFlags.find { it.key == flagKey }
-
-        if (flag == null) {
-            Logger.d("Feature flag '$flagKey' not found, returning default: $defaultValue")
-            return defaultValue
-        }
-
-        // If flag is globally disabled, return false
-        if (!flag.enabled) {
-            Logger.d("Feature flag '$flagKey' is disabled")
-            return false
-        }
-
-        // Check rollout percentage using user ID hash
-        val userId = storage?.userId ?: return defaultValue
-        if (flag.rolloutPercentage < 100) {
-            val hash = (userId + flagKey).hashCode().let { Math.abs(it) } % 100
-            if (hash >= flag.rolloutPercentage) {
-                Logger.d("Feature flag '$flagKey' not in rollout (user hash: $hash, rollout: ${flag.rolloutPercentage}%)")
-                return false
-            }
-        }
-
-        // Check targeting rules if present
-        if (flag.targetingRules != null && flag.targetingRules.isNotEmpty()) {
-            val userAttributes = storage?.userAttributes ?: emptyMap()
-            if (!targetingEngine!!.evaluate(flag.targetingRules, userAttributes)) {
-                Logger.d("Feature flag '$flagKey' targeting rules not matched")
-                return false
-            }
-        }
-
-        Logger.d("Feature flag '$flagKey' is enabled for user")
-        return true
+        return core?.isFeatureEnabled(flagKey, defaultValue) ?: defaultValue
     }
 
     /**
@@ -572,17 +482,7 @@ object RiviumAbTesting {
         defaultValue: Boolean = false,
         onResult: (Boolean) -> Unit
     ) {
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                val userId = storage?.userId ?: return@withContext defaultValue
-                val userAttributes = storage?.userAttributes
-
-                apiClient?.evaluateFlag(flagKey, userId, userAttributes)?.getOrNull()?.let {
-                    it.enabled
-                } ?: isFeatureEnabled(flagKey, defaultValue)
-            }
-            onResult(result)
-        }
+        core?.isFeatureEnabledAsync(flagKey, defaultValue, onResult) ?: onResult(defaultValue)
     }
 
     /**
@@ -594,15 +494,8 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun getFeatureValue(flagKey: String, defaultValue: Any? = null): Any? {
-        ensureInitialized()
-
-        val flag = featureFlags.find { it.key == flagKey }
-
-        if (flag == null || !isFeatureEnabled(flagKey)) {
-            return defaultValue
-        }
-
-        return flag.defaultValue ?: defaultValue
+        val running = core ?: return defaultValue
+        return running.getFeatureValue(flagKey, defaultValue)
     }
 
     /**
@@ -610,7 +503,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun getFeatureFlags(): List<FeatureFlag> {
-        return featureFlags
+        return core?.featureFlags ?: emptyList()
     }
 
     /**
@@ -618,19 +511,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun refreshFeatureFlags() {
-        scope.launch {
-            apiClient?.fetchFeatureFlags()?.onSuccess { fetchedFlags ->
-                featureFlags = fetchedFlags
-                storage?.saveFeatureFlags(fetchedFlags)
-                Logger.i("Refreshed ${fetchedFlags.size} feature flags")
-                callbacks.forEach { it.onFeatureFlagsRefreshed(fetchedFlags) }
-            }?.onFailure { error ->
-                Logger.e("Failed to refresh feature flags: ${error.message}")
-                callbacks.forEach {
-                    it.onError(error as? RiviumAbTestingError ?: RiviumAbTestingError.NetworkError(error.message ?: "Unknown error"))
-                }
-            }
-        }
+        core?.refreshFeatureFlags()
     }
 
     /**
@@ -638,7 +519,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun addCallback(callback: RiviumAbTestingCallback) {
-        callbacks.add(callback)
+        callbacks.addIfAbsent(callback)
     }
 
     /**
@@ -654,14 +535,14 @@ object RiviumAbTesting {
      */
     @JvmStatic
     val isOnline: Boolean
-        get() = _isOnline
+        get() = core?.isOnline ?: true
 
     /**
      * Get pending event count
      */
     @JvmStatic
     fun getPendingEventCount(): Int {
-        return eventQueue?.pendingCount() ?: 0
+        return core?.pendingEventCount() ?: 0
     }
 
     /**
@@ -669,9 +550,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun flush() {
-        scope.launch {
-            eventQueue?.flush()
-        }
+        core?.flush()
     }
 
     /**
@@ -679,7 +558,7 @@ object RiviumAbTesting {
      */
     @JvmStatic
     fun dispose() {
-        eventQueue?.stop()
+        core?.dispose()
         networkObserver?.stop()
     }
 
@@ -687,15 +566,13 @@ object RiviumAbTesting {
      * Reset SDK state (for testing)
      */
     @JvmStatic
+    @Synchronized
     fun reset() {
-        apiClient?.clearToken()
-        dispose()
-        storage?.clear()
-        experiments = emptyList()
-        featureFlags = emptyList()
+        networkObserver?.stop()
+        networkObserver = null
+        core?.close(clearData = true)
+        core = null
         callbacks.clear()
-        isInitialized = false
-        _isOnline = true
     }
 
     // Internal methods
@@ -707,51 +584,12 @@ object RiviumAbTesting {
         eventValue: Double? = null,
         properties: Map<String, Any>? = null
     ) {
-        ensureInitialized()
-
-        val assignment = storage?.getAssignment(experimentKey)
-        if (assignment == null) {
-            Logger.w("No assignment found for experiment: $experimentKey. Call getVariant() first.")
-            return
-        }
-        val userId = storage?.userId ?: return
-
-        Logger.d("Tracking event: type=${eventType.name}, experiment=$experimentKey, name=$eventName, value=$eventValue")
-
-        val event = TrackEvent(
-            experimentId = assignment.experimentId,
-            variantId = assignment.variantId,
-            userId = userId,
-            eventType = eventType,
-            eventName = eventName,
-            eventValue = eventValue,
-            properties = properties
-        )
-
-        eventQueue?.enqueue(event)
-        Logger.d("Event queued successfully")
+        core?.trackEvent(experimentKey, eventType, eventName, eventValue, properties)
+            ?: notInitialized("track")
     }
 
-    private suspend fun refreshExperimentsInternal() {
-        apiClient?.fetchExperiments()?.onSuccess { fetchedExperiments ->
-            experiments = fetchedExperiments
-            storage?.saveExperiments(fetchedExperiments)
-            callbacks.forEach { it.onExperimentsRefreshed(fetchedExperiments) }
-        }
-    }
-
-    private suspend fun refreshFeatureFlagsInternal() {
-        apiClient?.fetchFeatureFlags()?.onSuccess { fetchedFlags ->
-            featureFlags = fetchedFlags
-            storage?.saveFeatureFlags(fetchedFlags)
-            callbacks.forEach { it.onFeatureFlagsRefreshed(fetchedFlags) }
-        }
-    }
-
-    private fun ensureInitialized() {
-        if (!isInitialized && config == null) {
-            throw RiviumAbTestingError.NotInitialized()
-        }
+    private fun notInitialized(call: String) {
+        Logger.d("$call ignored: RiviumAbTesting.init() has not been called")
     }
 }
 

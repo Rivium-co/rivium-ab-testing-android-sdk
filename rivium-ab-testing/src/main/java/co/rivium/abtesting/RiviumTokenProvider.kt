@@ -12,8 +12,12 @@ package co.rivium.abtesting
  * call to your backend). Called when a token is needed, again shortly before
  * it expires, and once more if the service reports it expired. Never put the
  * server secret in the app.
+ *
+ * Return null (or throw) while no one is signed in. That is not an error: the
+ * SDK waits for a user token (see `RiviumAbTesting.isAwaitingUserToken`) and
+ * asks again after `RiviumAbTesting.refreshUserToken()`.
  */
 fun interface RiviumTokenProvider {
     @Throws(Exception::class)
-    fun fetchToken(): String
+    fun fetchToken(): String?
 }

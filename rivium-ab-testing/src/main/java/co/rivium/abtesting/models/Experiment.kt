@@ -66,6 +66,9 @@ data class Variant(
 
 /**
  * Assignment result
+ *
+ * @param inExperiment false when the user is shown this (control) variant
+ *   without taking part in the experiment; null when the service did not say.
  */
 data class Assignment(
     val experimentId: String,
@@ -73,5 +76,6 @@ data class Assignment(
     val variantId: String,
     val variantKey: String,
     val isControl: Boolean,
-    val config: Map<String, Any>?
+    val config: Map<String, Any>?,
+    val inExperiment: Boolean? = null
 )

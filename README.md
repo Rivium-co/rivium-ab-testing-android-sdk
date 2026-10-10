@@ -20,7 +20,7 @@ Add the SDK to your app's `build.gradle`:
 
 ```gradle
 dependencies {
-    implementation 'co.rivium:rivium-ab-testing-android:0.2.0'
+    implementation 'co.rivium:rivium-ab-testing-android:0.2.2'
 }
 ```
 
@@ -35,6 +35,7 @@ val config = RiviumAbTestingConfig(
     apiKey = "rv_live_your_api_key",
     // Your server mints this for the signed-in user (see "User tokens").
     // Runs on a background thread, so a blocking call is fine.
+    // Return null while no one is signed in.
     tokenProvider = RiviumTokenProvider { myBackend.fetchRiviumTokenBlocking() }
 )
 RiviumAbTesting.init(context, config)
@@ -43,12 +44,12 @@ RiviumAbTesting.init(context, config)
 RiviumAbTesting.setUserId("user-123")
 
 // 3. Get variant for an experiment
-val variant = RiviumAbTesting.getVariant("checkout-redesign")
-
-if (variant == "variant-a") {
-    // Show new design
-} else {
-    // Show control
+RiviumAbTesting.getVariantAsync("checkout-redesign") { variant ->
+    if (variant == "variant-a") {
+        // Show new design
+    } else {
+        // Show control
+    }
 }
 
 // 4. Track conversion
@@ -69,9 +70,11 @@ user from the token instead of from the app.
 
 `RiviumTokenProvider.fetchToken()` is called on a background thread when a
 token is needed, again shortly before it expires, and once more if the service
-reports it expired. Calling `setUserId` with a different user sends the last
-user's pending events under their own token, then drops their variants and
-token.
+reports it expired. Return `null` (or throw) while no one is signed in.
+
+If you would rather hand tokens over yourself, leave `tokenProvider` out and
+call `RiviumAbTesting.setUserToken(token)` after sign-in and whenever you
+refresh the token.
 
 A token is **required**: assigning variants, tracking events and
 evaluating flags are refused without one (reading the experiment and flag
@@ -79,25 +82,70 @@ lists is not, so the app can load them before anyone signs in). The same token w
 
 **Never put the server secret in the app.**
 
+### Before your user signs in
+
+You can call `init` before anyone is signed in. Without a token the SDK waits
+instead of failing: `RiviumAbTesting.isAwaitingUserToken` is `true`,
+`onAwaitingUserToken` is called once, `getVariant` returns the default you
+pass and nothing is sent for a user. It carries on by itself as soon as there
+is a token: the variants your app asked for are fetched
+(`onExperimentAssigned` is called for each) and the kept events are sent.
+
+```kotlin
+RiviumAbTesting.onAwaitingUserToken = { /* e.g. show the default experience */ }
+
+// After sign-in
+RiviumAbTesting.refreshUserToken()      // with a tokenProvider: asks it again now
+RiviumAbTesting.setUserToken(token)     // without one: hand the token over
+
+// After sign-out
+RiviumAbTesting.clearUserId()           // or setUserToken(null)
+```
+
+Events recorded before sign-in belong to an anonymous user, and the service
+credits events to the user in the token. So after sign-in only the events
+recorded for that same user id are sent (call `setUserId` with the id your
+server puts in the token before you track); the rest are dropped. The queue
+holds at most 1,000 events and drops the oldest first.
+
+### Switching users
+
+A different user id (`setUserId`), a token for another user or a sign-out
+(`clearUserId()`, `setUserToken(null)`) clears the previous user's variants,
+attributes, token and pending events before anything is done for the next
+user. Events of the previous user that are ready are sent once more under
+their own token; they are never sent under another user's token. Set the user
+attributes again after a switch.
+
 ## A/B Testing
 
 ### Get Variant
 
 ```kotlin
-// Synchronous
-val variant = RiviumAbTesting.getVariant(
-    experimentKey = "experiment-key",
-    defaultVariant = "control"  // fallback if offline and no cache
-)
-
-// Asynchronous
+// Asynchronous: waits for the service's answer
 RiviumAbTesting.getVariantAsync("experiment-key") { variant ->
     when (variant) {
         "variant-a" -> showNewCheckout()
         else -> showOriginalCheckout()
     }
 }
+
+// Synchronous: never blocks, safe on the main thread
+val variant = RiviumAbTesting.getVariant(
+    experimentKey = "experiment-key",
+    defaultVariant = "control"  // returned until the service has answered
+)
 ```
+
+`getVariant` returns the variant the service assigned earlier (it is kept on
+the device). The first time an experiment is asked for it returns
+`defaultVariant` at once and fetches the assignment in the background;
+`onExperimentAssigned` tells you when it is there. Use `getVariantAsync` when
+the first answer matters. The variant always comes from the service: the SDK
+never picks one on the device.
+
+A user the service keeps out of an experiment (targeting, traffic) gets the
+control variant; events you track for that experiment are then not recorded.
 
 ### Get Variant Config
 
@@ -236,15 +284,31 @@ RiviumAbTesting.init(context, config, object : RiviumAbTestingCallback {
         Log.d("Rivium", "Synced: $synced, failed: $failed, pending: $pending")
     }
 
+    override fun onOnlineMode() {
+        Log.d("Rivium", "Back online")
+    }
+
+    override fun onOfflineMode() {
+        Log.d("Rivium", "Offline")
+    }
+
     override fun onError(error: RiviumAbTestingError) {
         Log.e("Rivium", "Error: ${error.message}")
     }
 })
 ```
 
+No SDK method throws when it is called before `init`, before the first load
+has finished or before a user is signed in: getters return the default you
+pass and `track…` does nothing. If the first load fails (no network) the SDK
+works from its cache and loads again when the network is back.
+
 ## Offline Support
 
-Events are queued locally and automatically synced when the device comes online:
+Events are queued locally (at most 1,000, kept across app restarts) and
+automatically synced when the device comes online. They are sent 100 at a
+time; when the service is unreachable or asks the SDK to slow down, the SDK
+waits before it tries again:
 
 ```kotlin
 // Check online status
@@ -288,10 +352,15 @@ RiviumAbTesting.dispose()
 |---|---|
 | `init(context, config)` | Initialize the SDK |
 | `setUserId(id)` | Set user ID for assignment |
+| `clearUserId()` | Sign-out: forget the user and wait for a token |
+| `setUserToken(token)` | Hand over a user token (`null` after sign-out) |
+| `refreshUserToken()` | Ask the `tokenProvider` again now (after sign-in or sign-out) |
+| `isAwaitingUserToken` | `true` while the SDK waits for a user token |
+| `onAwaitingUserToken` | Called once each time the SDK starts waiting |
 | `getUserId()` | Get current user ID |
 | `setUserAttributes(attrs)` | Set targeting attributes |
-| `getVariant(key)` | Get assigned variant (sync) |
-| `getVariantAsync(key, callback)` | Get assigned variant (async) |
+| `getVariant(key)` | Get assigned variant (sync, never blocks) |
+| `getVariantAsync(key, callback)` | Get assigned variant (waits for the service) |
 | `getVariantConfig(key)` | Get variant configuration |
 | `isFeatureEnabled(key)` | Check if feature flag is on |
 | `isFeatureEnabledAsync(key, callback)` | Check flag with server eval |

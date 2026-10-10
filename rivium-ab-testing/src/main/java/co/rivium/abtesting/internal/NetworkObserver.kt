@@ -8,11 +8,12 @@ import android.net.NetworkRequest
 import android.os.Build
 
 /**
- * Observes network connectivity changes and triggers callbacks when network becomes available.
+ * Observes network connectivity changes and triggers callbacks when network becomes available or is lost.
  */
 internal class NetworkObserver(
     private val context: Context,
-    private val onNetworkAvailable: () -> Unit
+    private val onNetworkAvailable: () -> Unit,
+    private val onNetworkLost: () -> Unit = {}
 ) {
     private val connectivityManager: ConnectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -40,6 +41,12 @@ internal class NetworkObserver(
                 if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
                     onNetworkAvailable()
                 }
+            }
+
+            override fun onLost(network: Network) {
+                super.onLost(network)
+                // Another network may still be there (Wi-Fi lost, mobile data left).
+                if (!isNetworkAvailable()) onNetworkLost()
             }
         }
 
@@ -75,8 +82,12 @@ internal class NetworkObserver(
      * Check if network is currently available
      */
     fun isNetworkAvailable(): Boolean {
-        val network = connectivityManager.activeNetwork ?: return false
-        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        return try {
+            val network = connectivityManager.activeNetwork ?: return false
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (e: Throwable) {
+            true
+        }
     }
 }
