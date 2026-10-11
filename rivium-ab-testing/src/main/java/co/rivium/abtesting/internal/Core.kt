@@ -24,6 +24,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The SDK behind the public `RiviumAbTesting` object: the user, the user
@@ -45,13 +46,14 @@ internal class Core(
     private val callbacks: List<RiviumAbTestingCallback>,
     private val onAwaitingUserToken: () -> Unit,
     private val main: CoroutineDispatcher = Dispatchers.Main,
-    io: CoroutineDispatcher = Dispatchers.IO
+    io: CoroutineDispatcher = Dispatchers.IO,
+    private val clock: () -> Long = System::currentTimeMillis
 ) {
     private val scope = CoroutineScope(io + SupervisorJob())
     private val targetingEngine = TargetingEngine()
     private val queue = EventQueue(
         store = eventStore,
-        flushInterval = config.flushInterval,
+        flushInterval = { flushIntervalMs },
         currentUserId = { storage.userId },
         send = { userId, events -> asUser(userId) { token -> api.syncEvents(events, deviceId(), token) } },
         onSynced = { synced, failed, pending -> notify { it.onSyncCompleted(synced, failed, pending) } }
@@ -72,7 +74,21 @@ internal class Core(
 
     private val stateLock = Any()
     private val loadLock = Mutex()
-    private var flushTimer: Job? = null
+    @Volatile private var flushTimer: Job? = null
+
+    /**
+     * How often events are sent. The app's own [RiviumAbTestingConfig.flushInterval]
+     * when it chose one; otherwise the console's send interval, once known.
+     */
+    @Volatile var flushIntervalMs = config.flushInterval
+        private set
+
+    /** How long the experiment list is used before the service is asked again. */
+    @Volatile var listCacheMs = DEFAULT_LIST_CACHE_MS
+        private set
+    @Volatile private var listFetchedAt = 0L
+    @Volatile private var listRetryAt = 0L
+    private val refreshingList = AtomicBoolean(false)
 
     /** Experiments the app asked a variant for and the service has not answered yet. */
     private val wanted = LinkedHashSet<String>()
@@ -87,6 +103,17 @@ internal class Core(
         /** After a failed assignment the same experiment is not asked about again for this long. */
         private const val ASSIGN_RETRY_MS = 10_000L
         private const val DEFAULT_RATE_LIMIT_PAUSE_MS = 60_000L
+
+        private const val DEFAULT_LIST_CACHE_MS = 300_000L
+        /** After a list refresh that failed, the next one waits this long. */
+        private const val LIST_RETRY_MS = 60_000L
+
+        // Whatever the console says, events are never sent more often than
+        // every 10 seconds and the list is never asked for more than once a minute.
+        private const val MIN_SEND_INTERVAL_S = 10
+        private const val MAX_SEND_INTERVAL_S = 3600
+        private const val MIN_LIST_CACHE_S = 60
+        private const val MAX_LIST_CACHE_S = 86_400
     }
 
     // ============================================
@@ -119,7 +146,7 @@ internal class Core(
         flushTimer?.cancel()
         flushTimer = scope.launch {
             while (isActive) {
-                delay(config.flushInterval)
+                delay(flushIntervalMs)
                 // While waiting for a user token the timer does nothing.
                 if (!isAwaitingUserToken) queue.flush()
             }
@@ -129,14 +156,13 @@ internal class Core(
     private suspend fun load() = loadLock.withLock {
         Logger.i("Fetching experiments and feature flags from server...")
 
-        api.initSdk().valueOrNull()?.config?.let { sdkConfig ->
-            Logger.d("SDK config: syncInterval=${sdkConfig.syncIntervalSeconds}s, maxBatch=${sdkConfig.maxBatchSize}")
-        }
+        api.initSdk().valueOrNull()?.config?.let { applyServerConfig(it) }
 
         val experimentsResult = api.fetchExperiments()
         experimentsResult.valueOrNull()?.let { fetched ->
             experiments = fetched
             storage.saveExperiments(fetched)
+            listFetchedAt = clock()
             Logger.i("Fetched ${fetched.size} experiments")
         }
 
@@ -164,6 +190,51 @@ internal class Core(
 
         // Who is the user? Without a token the SDK waits for one.
         if (resolveToken(force = true) != null) resume()
+    }
+
+    /**
+     * Takes over what the console says: how long the experiment list is kept
+     * and, unless the app chose its own interval, how often events are sent.
+     * Values out of bounds are brought inside them; a missing one changes nothing.
+     */
+    private fun applyServerConfig(sdkConfig: ApiClient.SdkConfig) {
+        sdkConfig.cacheTtlSeconds?.takeIf { it > 0 }?.let { seconds ->
+            listCacheMs = seconds.coerceIn(MIN_LIST_CACHE_S, MAX_LIST_CACHE_S) * 1000L
+        }
+        if (config.flushInterval != RiviumAbTestingConfig.DEFAULT_FLUSH_INTERVAL) return
+        sdkConfig.syncIntervalSeconds?.takeIf { it > 0 }?.let { seconds ->
+            val interval = seconds.coerceIn(MIN_SEND_INTERVAL_S, MAX_SEND_INTERVAL_S) * 1000L
+            if (interval != flushIntervalMs) {
+                flushIntervalMs = interval
+                Logger.d("Send interval is now ${interval / 1000}s")
+                // A timer that was stopped stays stopped.
+                if (flushTimer != null) startTimer()
+            }
+        }
+    }
+
+    /**
+     * The experiment list is older than the console allows: ask again in the
+     * background. The caller is never kept waiting and goes on with the list
+     * it has. Only one refresh runs at a time.
+     */
+    private fun refreshListIfStale() {
+        if (!isInitialized || !isOnline) return
+        val now = clock()
+        if (now < listRetryAt || (now - listFetchedAt) in 0 until listCacheMs) return
+        if (!refreshingList.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                api.initSdk().valueOrNull()?.config?.let { applyServerConfig(it) }
+                if (refreshExperimentsQuietly()) {
+                    listRetryAt = 0L
+                } else {
+                    listRetryAt = clock() + LIST_RETRY_MS
+                }
+            } finally {
+                refreshingList.set(false)
+            }
+        }
     }
 
     /** Stops the timer. What is queued is sent once more, without blocking the caller. */
@@ -474,6 +545,7 @@ internal class Core(
      * service is asked in the background (or while there is no user token).
      */
     fun getVariant(experimentKey: String, defaultVariant: String): String {
+        refreshListIfStale()
         storage.getAssignment(experimentKey)?.let { return it.variantKey }
         assignable(experimentKey) ?: return defaultVariant
 
@@ -488,6 +560,7 @@ internal class Core(
 
     /** Waits for the service's answer; [defaultVariant] when there is none. */
     fun getVariantAsync(experimentKey: String, defaultVariant: String, onResult: (String) -> Unit) {
+        refreshListIfStale()
         scope.launch {
             val variant = storage.getAssignment(experimentKey)?.variantKey
                 ?: assignable(experimentKey)?.let {
@@ -542,13 +615,10 @@ internal class Core(
                 assignRetryAt.remove(experimentKey)
                 Logger.i("Assignment for $experimentKey: variant=${assignment.variantKey}")
 
-                // Events recorded before the answer can go now - unless the
-                // user is only shown the control and does not take part.
-                queue.resolve(
-                    userId,
-                    assignment.experimentId,
-                    assignment.variantId.takeIf { assignment.inExperiment != false }
-                )
+                // Events recorded before the answer can go now. That holds
+                // for a user who is only shown the control too: the service
+                // decides what an event counts for.
+                queue.resolve(userId, assignment.experimentId, assignment.variantId)
                 notify { it.onExperimentAssigned(experimentKey, assignment.variantKey, assignment.config) }
                 if (queue.pendingCount() > 0 && !queue.isPaused) scope.launch { queue.flush() }
                 return assignment
@@ -573,6 +643,7 @@ internal class Core(
                 is ApiResult.Success -> {
                     experiments = result.value
                     storage.saveExperiments(result.value)
+                    listFetchedAt = clock()
                     notify { it.onExperimentsRefreshed(result.value) }
                 }
                 is ApiResult.Failure -> notify { it.onError(result.toError()) }
@@ -580,12 +651,14 @@ internal class Core(
         }
     }
 
-    private fun refreshExperimentsQuietly() {
-        api.fetchExperiments().valueOrNull()?.let { fetched ->
-            experiments = fetched
-            storage.saveExperiments(fetched)
-            notify { it.onExperimentsRefreshed(fetched) }
-        }
+    /** True when the list was fetched. */
+    private fun refreshExperimentsQuietly(): Boolean {
+        val fetched = api.fetchExperiments().valueOrNull() ?: return false
+        experiments = fetched
+        storage.saveExperiments(fetched)
+        listFetchedAt = clock()
+        notify { it.onExperimentsRefreshed(fetched) }
+        return true
     }
 
     // ============================================
@@ -600,15 +673,14 @@ internal class Core(
         properties: Map<String, Any>?
     ) {
         val userId = storage.userId ?: return
+        refreshListIfStale()
         val assignment = storage.getAssignment(experimentKey)
 
         val experimentId: String
         val variantId: String
         if (assignment != null) {
-            if (assignment.inExperiment == false) {
-                Logger.d("User is not in experiment $experimentKey - event not recorded")
-                return
-            }
+            // A user who is only shown the control (inExperiment == false)
+            // is tracked like anyone else: the service decides what counts.
             experimentId = assignment.experimentId
             variantId = assignment.variantId
         } else {

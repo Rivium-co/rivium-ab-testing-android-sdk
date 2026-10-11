@@ -20,7 +20,8 @@ import kotlinx.coroutines.sync.withLock
  */
 internal class EventQueue(
     private val store: KeyValueStore,
-    private val flushInterval: Long,
+    /** The current send interval in milliseconds; it can change while the app runs. */
+    private val flushInterval: () -> Long,
     /** The signed-in user; only their events may be sent. */
     private val currentUserId: () -> String?,
     /** Sends one chunk as [userId]. Null: there is no user token to send it under, so wait. */
@@ -120,7 +121,7 @@ internal class EventQueue(
                         // Rate limited: wait as long as the service asked.
                         status == 429 -> pause(result.retryAfterMs ?: DEFAULT_RATE_LIMIT_PAUSE_MS)
                         // The month's events are used up: nothing more until the next interval.
-                        status == 403 && result.code == "event_limit_reached" -> pause(flushInterval)
+                        status == 403 && result.code == "event_limit_reached" -> pause(flushInterval())
                         // The token: the SDK now waits for another one.
                         status == 401 -> Unit
                         // Anything else would be refused again: these events are lost.
@@ -205,7 +206,7 @@ internal class EventQueue(
 
     private fun backoff(): Long {
         failures = minOf(failures + 1, 10)
-        return minOf(flushInterval.coerceAtLeast(1000L) * (1L shl failures), MAX_BACKOFF_MS)
+        return minOf(flushInterval().coerceAtLeast(1000L) * (1L shl failures), MAX_BACKOFF_MS)
     }
 
     // Gson fills fields without looking at Kotlin nullability.

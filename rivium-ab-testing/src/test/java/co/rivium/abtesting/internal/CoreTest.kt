@@ -467,17 +467,54 @@ class CoreTest {
     }
 
     @Test
-    fun `a user outside the experiment gets the control and no events`() {
+    fun `a user outside the experiment gets the control and their events are sent once`() {
         service.assign = { FakeService.assigned(variantKey = "control", inExperiment = false) }
+        // The service takes the request and counts such an event as not stored.
+        service.sync = { call ->
+            json(200, """{"success":true,"synced":0,"failed":${FakeService.eventsOf(call).size},"errors":["Event x: User is not in this experiment"]}""")
+        }
         val core = start(userToken = userToken("alice"))
 
         assertEquals("control", core.variantAsync(default = "fallback"))
         core.track()
         core.flush()
+        eventually { service.to("/public/sync").size == 1 }
+        settle()
+        core.flush()
         settle()
 
+        val sent = syncedEvents()
+        assertEquals(1, sent.size)
+        assertEquals("exp-1", sent[0].getString("experimentId"))
+        assertEquals("alice", sent[0].getString("userId"))
+        // Not kept, not sent again, and not an error.
         assertEquals(0, core.pendingEventCount())
-        assertTrue(service.to("/public/sync").isEmpty())
+        assertEquals(1, service.to("/public/sync").size)
+        assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun `events recorded before the service said the user is outside are sent too`() {
+        val token = AtomicReference<String?>(null)
+        service.assign = { FakeService.assigned(variantKey = "control", inExperiment = false) }
+        val core = start(provider = RiviumTokenProvider { token.get() })
+        core.setUserId("alice")
+        eventually { core.isAwaitingUserToken }
+
+        assertEquals("fallback", core.getVariant("checkout", "fallback"))
+        core.track()
+        assertEquals(1, core.pendingEventCount())
+        assertTrue(service.userCalls().isEmpty())
+
+        token.set(userToken("alice"))
+        core.refreshUserToken()
+        eventually { service.to("/public/sync").isNotEmpty() }
+
+        val sent = syncedEvents()
+        assertEquals(1, sent.size)
+        assertEquals("alice", sent[0].getString("userId"))
+        assertTrue(sent[0].getString("variantId").isNotEmpty())
+        eventually { core.pendingEventCount() == 0 }
         assertTrue(errors.isEmpty())
     }
 

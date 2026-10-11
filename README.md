@@ -20,7 +20,7 @@ Add the SDK to your app's `build.gradle`:
 
 ```gradle
 dependencies {
-    implementation 'co.rivium:rivium-ab-testing-android:0.2.2'
+    implementation 'co.rivium:rivium-ab-testing-android:0.2.3'
 }
 ```
 
@@ -328,7 +328,7 @@ val config = RiviumAbTestingConfig(
     apiKey = "rv_live_your_api_key",
     tokenProvider = tokenProvider, // user token minted by your server
     debug = false,               // log to logcat (development only; no keys or bodies are logged)
-    flushInterval = 10000L,      // Auto-flush interval in ms (default: 30s)
+    flushInterval = 10000L,      // Auto-flush interval in ms. Left at the default (30s) the SDK follows the send interval set in the Rivium console
     maxQueueSize = 50            // Max events before auto-flush (default: 100)
 )
 ```

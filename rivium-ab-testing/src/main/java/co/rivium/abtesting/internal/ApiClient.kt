@@ -319,7 +319,7 @@ internal class ApiClient(
         }
 
     companion object {
-        const val SDK_VERSION = "0.2.2"
+        const val SDK_VERSION = "0.2.3"
 
         /** The most events the service takes in one request. */
         const val MAX_EVENTS_PER_REQUEST = 100
@@ -351,9 +351,10 @@ internal class ApiClient(
         val serverTime: String? = null
     )
 
+    /** What the console says. A value that is missing is null: the SDK keeps what it uses. */
     data class SdkConfig(
-        val cacheTtlSeconds: Int = 300,
-        val syncIntervalSeconds: Int = 30,
+        val cacheTtlSeconds: Int? = null,
+        val syncIntervalSeconds: Int? = null,
         val maxOfflineEvents: Int = 1000,
         val maxBatchSize: Int = 100,
         val enableOfflineMode: Boolean = true,

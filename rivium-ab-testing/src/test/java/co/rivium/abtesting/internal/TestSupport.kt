@@ -39,6 +39,8 @@ internal class FakeService : Dispatcher() {
     val calls = CopyOnWriteArrayList<Call>()
 
     @Volatile var reads: () -> MockResponse? = { null }
+    /** The `config` object of `/public/init`, as JSON. */
+    @Volatile var config: String = "{}"
     @Volatile var assign: (Call) -> MockResponse = { assigned() }
     @Volatile var sync: (Call) -> MockResponse = { call -> synced(eventsOf(call).size) }
     @Volatile var flagEvaluation: (Call) -> MockResponse = { json(200, """{"flagKey":"f","enabled":true}""") }
@@ -56,7 +58,7 @@ internal class FakeService : Dispatcher() {
         )
         calls.add(call)
         return when (call.path) {
-            "/public/init" -> reads() ?: json(200, """{"experiments":[],"config":{}}""")
+            "/public/init" -> reads() ?: json(200, """{"experiments":[],"config":$config}""")
             "/public/experiments" -> reads() ?: json(200, EXPERIMENTS)
             "/public/flags" -> reads() ?: json(200, """{"flags":[{"id":"f1","key":"new-ui","name":"New UI","enabled":true,"rolloutPercentage":100}]}""")
             "/public/assign" -> assign(call)

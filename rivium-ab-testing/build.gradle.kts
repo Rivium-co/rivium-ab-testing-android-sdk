@@ -65,7 +65,7 @@ mavenPublishing {
     )
     signAllPublications()
 
-    coordinates("co.rivium", "rivium-ab-testing-android", "0.2.2")
+    coordinates("co.rivium", "rivium-ab-testing-android", "0.2.3")
 
     pom {
         name.set("Rivium A/B Testing Android SDK")
